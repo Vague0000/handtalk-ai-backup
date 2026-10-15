@@ -2906,6 +2906,18 @@ html, body {
   border-radius: 14px;
   object-fit: contain;
 }
+/* Sign illustrations are black line art on a transparent background, so
+   give them an opaque white card to stay legible on the dark theme. */
+.dictv-preview-image {
+  display: block;
+  margin: 0 auto;
+  box-sizing: border-box;
+  padding: 16px;
+  background: #FFFFFF;
+  filter: none;
+  opacity: 1;
+  mix-blend-mode: normal;
+}
 .dictv-preview-placeholder {
   width: 220px;
   height: 220px;

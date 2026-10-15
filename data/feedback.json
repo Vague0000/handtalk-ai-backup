@@ -43,5 +43,15 @@
     "type": "rating",
     "rating": 5,
     "timestamp": "2026-07-27T07:21:43.225835+00:00"
+  },
+  {
+    "type": "rating",
+    "rating": 4,
+    "timestamp": "2026-10-14T15:21:58.562549+00:00"
+  },
+  {
+    "type": "rating",
+    "rating": 5,
+    "timestamp": "2026-10-14T15:22:00.289535+00:00"
   }
 ]
