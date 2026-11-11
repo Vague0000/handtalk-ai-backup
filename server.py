@@ -13,10 +13,10 @@ components main.py's run_demo() uses:
     - src/speech.py              (SpeechOutput / TTS)
 
 The sentence-builder (hold-to-confirm letters) and the SPEAK-gesture
-hold-to-speak trigger are ported as-is from main.py's WordBuilder and
-run_demo() loop. server.py's only job is to run that same loop headlessly
-(no cv2.imshow) and push the results to the browser over WebSocket instead
-of drawing them to an OpenCV window.
+hold-to-speak trigger reuse the existing project logic. The visitor's browser
+opens its own webcam with getUserMedia(), sends compressed frames through
+Socket.IO, and this server runs MediaPipe/TensorFlow inference on those frames.
+The Render server never tries to open a physical webcam.
 
 Socket events
 --------------
@@ -35,12 +35,11 @@ Server -> Dashboard:
     "server_error" : { message }
 
 Dashboard -> Server:
-    "speak"  : { text }   # user pressed the Speak button
+    "process_frame" : { image }  # base64 JPEG from the browser webcam
+    "speak"         : { text }   # user pressed the Speak button
 
-Camera lifecycle is tied to socket connections: the camera starts on the
-first client connect and stops when the last client disconnects, so it
-matches the dashboard's existing Start/Stop button behavior (Start ->
-connectSocket(), Stop -> socket.disconnect()).
+The AI pipeline starts on socket connection and stops when the last client
+disconnects. Browser camera tracks are started/stopped by dashboard JavaScript.
 """
 
 import os
@@ -51,6 +50,7 @@ import threading
 import traceback
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -114,8 +114,8 @@ app.register_blueprint(feedback_bp)
 # clash with OpenCV/TensorFlow's own native threads.
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-CAMERA_INDEX = 0
 JPEG_QUALITY = 70
+MAX_FRAME_BYTES = 1_500_000
 
 
 @app.route("/")
@@ -257,10 +257,14 @@ class GestureStreamer:
         self.builder   = WordBuilder(hold=20)
 
         self._clahe     = cv2.createCLAHE(2.0, (8, 8))
-        self._cap       = None
-        self._thread    = None
+        # The webcam belongs to the visitor's browser, never to the Render
+        # server. Frames arrive through the process_frame Socket.IO event.
         self._running   = False
         self._lock      = threading.Lock()
+        self._frame_lock = threading.Lock()
+        self._fps_count = 0
+        self._fps_started = time.time()
+        self._fps_value = 0.0
 
         self._motion_label = None
         self._motion_conf  = 0.0
@@ -278,43 +282,29 @@ class GestureStreamer:
 
     # -- lifecycle ------------------------------------------------------------
     def start(self):
+        """Mark the AI pipeline ready; the browser supplies webcam frames."""
         with self._lock:
             if self._running:
                 return
-            print(f"[server] Opening camera index {CAMERA_INDEX} ...")
-            self._cap = cv2.VideoCapture(CAMERA_INDEX)
-            if not self._cap.isOpened():
-                self._cap.release()
-                self._cap = None
-                msg = (
-                    f"Could not open camera index {CAMERA_INDEX}. "
-                    "It may be in use by another app (close Camera app / Zoom / "
-                    "the old browser tab), blocked by Windows camera privacy "
-                    "settings, or you may need a different CAMERA_INDEX."
-                )
-                print(f"[server] {msg}")
-                socketio.emit("server_error", {"message": msg})
-                raise RuntimeError(msg)
-
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  WINDOW_WIDTH)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WINDOW_HEIGHT)
-            self._cap.set(cv2.CAP_PROP_FPS, FPS_TARGET)
-            print("[server] Camera opened successfully.")
             self.builder.clear()
             if self.motion_pred:
                 self.motion_pred.reset()
+            self.static_pred.smoother.reset()
+            self._motion_display_frames = 0
+            self._speak_start = None
+            self._fps_count = 0
+            self._fps_started = time.time()
+            self._fps_value = 0.0
             self._running = True
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
+        print("[server] AI pipeline ready; waiting for browser camera frames.")
 
     def stop(self):
+        """Stop processing. No physical camera is opened on the server."""
         with self._lock:
             self._running = False
-        if self._thread:
-            self._thread.join(timeout=2)
-        if self._cap:
-            self._cap.release()
-            self._cap = None
+        self.builder.clear()
+        if self.motion_pred:
+            self.motion_pred.reset()
 
     def speak_text(self, text):
         text = (text or "").strip()
@@ -341,110 +331,96 @@ class GestureStreamer:
         # loop while the camera is running) would overwrite it right back.
         self.builder.clear()
 
-    # -- main loop --------------------------------------------------------------
-    def _loop(self):
-        fps_c, fps_t, fps_d = 0, time.time(), 0.0
-        gesture, confidence, top_k = "—", 0.0, []
-        speak_progress = 0.0
+    # -- browser-frame inference ------------------------------------------------
+    def process_browser_frame(self, encoded_image):
+        """Decode one JPEG supplied by the browser and run the existing AI pipeline."""
+        if not self._running:
+            return
+        if not isinstance(encoded_image, str) or len(encoded_image) > (MAX_FRAME_BYTES * 2):
+            raise ValueError("Invalid or oversized camera frame.")
 
         try:
-            consecutive_failures = 0
-            while self._running:
-                frame_start = time.time()
-                ret, frame = self._cap.read()
-                if not ret:
-                    consecutive_failures += 1
-                    if consecutive_failures == 1:
-                        print("[server] Camera read failed, retrying...")
-                    if consecutive_failures >= 60:  # ~3s of failures at 0.05s sleep
-                        msg = (
-                            f"Camera stopped returning frames after "
-                            f"{consecutive_failures} failed reads. It may have "
-                            "been disconnected or grabbed by another app."
-                        )
-                        print(f"[server] {msg}")
-                        socketio.emit("server_error", {"message": msg})
-                        break
-                    time.sleep(0.05)
-                    continue
-                consecutive_failures = 0
-                frame = cv2.flip(frame, 1)
-                enh = self._enhance(frame)
+            raw = base64.b64decode(encoded_image, validate=True)
+        except Exception as exc:
+            raise ValueError("The browser sent an invalid camera frame.") from exc
+        if not raw or len(raw) > MAX_FRAME_BYTES:
+            raise ValueError("Camera frame is empty or too large.")
 
-                features, results = self.extractor.extract_features(enh)
-                if self.show_landmarks:
-                    self.extractor.draw_landmarks(frame, results)
+        with self._frame_lock:
+            frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                raise ValueError("Unable to decode the browser camera frame.")
 
-                if features is not None:
-                    if self.motion_pred:
-                        self.motion_pred.push(features)
-                        ml, mc = self.motion_pred.predict()
-                        if ml is not None:
-                            self._motion_label, self._motion_conf = ml, mc
-                            self._motion_display_frames = 30
+            frame = cv2.flip(frame, 1)
+            enhanced = self._enhance(frame)
+            features, results = self.extractor.extract_features(enhanced)
+            if self.show_landmarks:
+                self.extractor.draw_landmarks(frame, results)
 
-                    s_label, s_conf, top_k, _source = self.recognizer.predict_with_top_k(features, k=3)
+            if features is not None:
+                if self.motion_pred:
+                    self.motion_pred.push(features)
+                    motion_label, motion_conf = self.motion_pred.predict()
+                    if motion_label is not None:
+                        self._motion_label = motion_label
+                        self._motion_conf = motion_conf
+                        self._motion_display_frames = 30
 
-                    if self._motion_display_frames > 0:
-                        gesture, confidence = self._motion_label, self._motion_conf
-                        self._motion_display_frames -= 1
-                    else:
-                        gesture, confidence = s_label, s_conf
+                static_label, static_conf, top_k, _source = self.recognizer.predict_with_top_k(features, k=3)
+                if self._motion_display_frames > 0:
+                    gesture, confidence = self._motion_label, self._motion_conf
+                    self._motion_display_frames -= 1
                 else:
-                    gesture, confidence, top_k = "No Hand", 0.0, []
-                    if self.motion_pred:
-                        self.motion_pred.reset()
-                    self.builder._last = ""
-                    self.builder._cnt = 0
+                    gesture, confidence = static_label, static_conf
+            else:
+                gesture, confidence, top_k = "No Hand", 0.0, []
+                if self.motion_pred:
+                    self.motion_pred.reset()
+                self.builder._last = ""
+                self.builder._cnt = 0
 
-                # SPEAK (thumbs-up hold) trigger
-                speak_now = gesture == SPEAK_LABEL and confidence >= CONFIDENCE_THRESHOLD
-                if speak_now and self.builder.sentence.strip():
-                    if self._speak_start is None:
-                        self._speak_start = time.time()
-                    elapsed = time.time() - self._speak_start
-                    speak_progress = min(elapsed / SPEAK_HOLD_SECONDS, 1.0)
-                    if elapsed >= SPEAK_HOLD_SECONDS:
-                        sentence_to_speak = self.builder.sentence.strip()
-                        self.speak_text(sentence_to_speak)
-                        self.builder.clear()
-                        self._speak_start = None
-                        speak_progress = 0.0
-                else:
+            speak_now = gesture == SPEAK_LABEL and confidence >= CONFIDENCE_THRESHOLD
+            speak_progress = 0.0
+            if speak_now and self.builder.sentence.strip():
+                if self._speak_start is None:
+                    self._speak_start = time.time()
+                elapsed = time.time() - self._speak_start
+                speak_progress = min(elapsed / SPEAK_HOLD_SECONDS, 1.0)
+                if elapsed >= SPEAK_HOLD_SECONDS:
+                    sentence_to_speak = self.builder.sentence.strip()
+                    self.speak_text(sentence_to_speak)
+                    self.builder.clear()
                     self._speak_start = None
                     speak_progress = 0.0
+            else:
+                self._speak_start = None
 
-                if speak_progress < 0.1:
-                    self.builder.update(gesture, confidence)
+            if speak_progress < 0.1:
+                self.builder.update(gesture, confidence)
 
-                # FPS
-                fps_c += 1
-                if time.time() - fps_t >= 1.0:
-                    fps_d = fps_c / (time.time() - fps_t)
-                    fps_c, fps_t = 0, time.time()
+            self._fps_count += 1
+            now = time.time()
+            elapsed = now - self._fps_started
+            if elapsed >= 1.0:
+                self._fps_value = self._fps_count / elapsed
+                self._fps_count = 0
+                self._fps_started = now
 
-                # Encode + emit
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-                if ok:
-                    image_b64 = base64.b64encode(buf).decode("utf-8")
-                    socketio.emit("frame", {
-                        "image":          image_b64,
-                        "fps":            fps_d,
-                        "gesture":        gesture,
-                        "confidence":     confidence,
-                        "top_k":          [{"label": l, "confidence": c} for l, c in top_k],
-                        "mode":           "HYBRID" if self.motion_ok else "STATIC",
-                        "sentence":       self.builder.sentence,
-                        "speak_progress": speak_progress,
-                    })
+            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if not ok:
+                raise RuntimeError("Could not encode the processed camera frame.")
+            image_b64 = base64.b64encode(buffer).decode("ascii")
 
-                elapsed = time.time() - frame_start
-                socketio.sleep(max(0.0, 1.0 / FPS_TARGET - elapsed))
-        except Exception:
-            traceback.print_exc()
-            socketio.emit("server_error", {"message": "Camera loop crashed. Check server logs."})
-        finally:
-            self._running = False
+            socketio.emit("frame", {
+                "image": image_b64,
+                "fps": self._fps_value,
+                "gesture": gesture,
+                "confidence": float(confidence),
+                "top_k": [{"label": label, "confidence": float(conf)} for label, conf in top_k],
+                "mode": "HYBRID" if self.motion_ok else "STATIC",
+                "sentence": self.builder.sentence,
+                "speak_progress": speak_progress,
+            })
 
     def _enhance(self, frame):
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -512,6 +488,20 @@ def on_disconnect():
     print(f"[server] Client disconnected ({count} active)")
     if count == 0 and streamer is not None:
         streamer.stop()
+
+
+@socketio.on("process_frame")
+def on_process_frame(data):
+    """Receive a compressed JPEG from the user's browser webcam."""
+    try:
+        if not isinstance(data, dict):
+            raise ValueError("Missing camera frame data.")
+        get_streamer().process_browser_frame(data.get("image", ""))
+        return {"ok": True}
+    except Exception as e:
+        print(f"[server] Browser frame processing failed: {e}")
+        socketio.emit("server_error", {"message": str(e)})
+        return {"ok": False, "error": str(e)}
 
 
 @socketio.on("speak")

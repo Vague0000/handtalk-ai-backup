@@ -28,6 +28,11 @@ function el(id) { return document.getElementById(id); }
 // reads it was defined earlier; declaring it this early avoids that
 // regardless of call order.
 let socket = null;
+let browserCameraStream = null;
+let browserCameraVideo = null;
+let browserCameraCanvas = null;
+let browserFrameTimer = null;
+let browserFrameBusy = false;
 
 // ── Auth gate ─────────────────────────────────────────────────────
 // Runs as soon as this script loads. If there's no active session,
@@ -1254,34 +1259,121 @@ function showCamError() {
 
 function hideCamError() {
   el('cam-error-overlay').classList.remove('show');
+  const errorText = document.querySelector('#cam-error-overlay .cam-error-text');
+  if (errorText) errorText.textContent = 'Unable to access the camera. Please check your permissions and try again.';
 }
 
 function retryCamera() {
+  if (state.running || browserCameraStream) stopCamera();
   hideCamError();
   startCamera();
 }
 
-function startCamera() {
-  // Guard against double-start (e.g. a double-click on "Start Feed"):
-  // without this, connectSocket() below would open a second, orphaned
-  // socket.io connection on top of the still-running one. The old
-  // connection never gets disconnected by a later Stop click (which only
-  // knows about the *current* `socket` reference), so the camera and
-  // analytics keep running server-side even after the session is "stopped".
+async function startCamera() {
   if (state.running) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showCameraError('This browser cannot access the camera. Use a current browser over HTTPS.');
+    return;
+  }
 
-  state.running = true;
-  startSessionTimer();
-  showToast('Connecting to AI backend…');
   showCamLoading();
+  try {
+    // The webcam is opened on the visitor's device, not on the Render server.
+    browserCameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
 
-  // ── Phase 2: connect WebSocket ──
-  connectSocket();
+    browserCameraVideo = document.createElement('video');
+    browserCameraVideo.autoplay = true;
+    browserCameraVideo.muted = true;
+    browserCameraVideo.playsInline = true;
+    browserCameraVideo.srcObject = browserCameraStream;
+    await browserCameraVideo.play();
+
+    browserCameraCanvas = document.createElement('canvas');
+    browserCameraCanvas.width = 640;
+    browserCameraCanvas.height = 480;
+
+    state.running = true;
+    startSessionTimer();
+    showToast('Camera ready. Connecting to AI backend…');
+    connectSocket();
+  } catch (error) {
+    stopBrowserCamera();
+    let message = 'Unable to start the camera. Please check your camera and browser permissions.';
+    if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+      message = 'Camera permission was denied. Allow camera access in your browser settings, then retry.';
+    } else if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+      message = 'No camera was detected. Connect a webcam and try again.';
+    } else if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
+      message = 'The camera is already being used by another application. Close it and retry.';
+    } else if (error?.name === 'OverconstrainedError') {
+      message = 'The camera does not support the requested video settings. Try another camera.';
+    }
+    showCameraError(message);
+  }
 }
+
+function showCameraError(message) {
+  const errorText = document.querySelector('#cam-error-overlay .cam-error-text');
+  if (errorText && message) errorText.textContent = message;
+  showCamError();
+}
+
+function startBrowserFramePump() {
+  stopBrowserFramePump();
+  if (!browserCameraVideo || !browserCameraCanvas || !socket?.connected) return;
+  const context = browserCameraCanvas.getContext('2d', { alpha: false });
+  browserFrameTimer = setInterval(() => {
+    if (!state.running || !socket?.connected || browserFrameBusy) return;
+    if (browserCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    browserFrameBusy = true;
+    try {
+      const width = browserCameraVideo.videoWidth || 640;
+      const height = browserCameraVideo.videoHeight || 480;
+      const scale = Math.min(1, 640 / width, 480 / height);
+      browserCameraCanvas.width = Math.max(1, Math.round(width * scale));
+      browserCameraCanvas.height = Math.max(1, Math.round(height * scale));
+      context.drawImage(browserCameraVideo, 0, 0, browserCameraCanvas.width, browserCameraCanvas.height);
+      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.65).split(',')[1];
+      socket.emit('process_frame', { image: jpeg }, () => {
+        browserFrameBusy = false;
+      });
+    } catch (error) {
+      browserFrameBusy = false;
+      console.error('[camera] Frame capture failed:', error);
+    }
+  }, 120); // About 8 frames/second; keeps Render CPU and bandwidth reasonable.
+}
+
+function stopBrowserFramePump() {
+  if (browserFrameTimer) clearInterval(browserFrameTimer);
+  browserFrameTimer = null;
+  browserFrameBusy = false;
+}
+
+function stopBrowserCamera() {
+  stopBrowserFramePump();
+  if (browserCameraStream) {
+    browserCameraStream.getTracks().forEach(track => track.stop());
+  }
+  browserCameraStream = null;
+  if (browserCameraVideo) {
+    browserCameraVideo.pause();
+    browserCameraVideo.srcObject = null;
+  }
+  browserCameraVideo = null;
+  browserCameraCanvas = null;
+}
+
+// Release the visitor's webcam if they navigate away or close the tab.
+window.addEventListener('pagehide', stopBrowserCamera);
 
 function stopCamera() {
   state.running = false;
   stopSessionTimer();
+  stopBrowserCamera();
   el('camera-feed').classList.remove('active');
   el('camera-img').src = '';
   setStatus(false);
@@ -1290,8 +1382,6 @@ function stopCamera() {
   if (fpsBadge) fpsBadge.textContent = '0 fps';
   hideCamLoading();
   hideCamError();
-
-  // ── Phase 2: disconnect ──
   disconnectSocket();
 }
 
@@ -1541,7 +1631,8 @@ function connectSocket() {
 
   socket.on('connect', () => {
     setStatus(true);
-    showToast('Connected to Python backend');
+    showToast('Connected to AI backend');
+    startBrowserFramePump();
     // Re-apply landmark preference; server resets to show_landmarks=True on
     // each GestureStreamer.start(), so we must re-send the saved preference.
     if (currentSettings && currentSettings.show_landmarks === false) {
@@ -1562,16 +1653,24 @@ function connectSocket() {
 
   socket.on('disconnect', () => {
     setStatus(false);
+    stopBrowserFramePump();
+    if (state.running) showCameraError('Connection to the AI backend was lost. Check your connection and retry.');
     showToast('Disconnected');
   });
 
   socket.on('connect_error', () => {
-    if (state.running) showCamError();
+    stopBrowserFramePump();
+    if (state.running) {
+      state.running = false;
+      stopSessionTimer();
+      stopBrowserCamera();
+      disconnectSocket();
+      showCameraError('Could not connect to the AI backend. Check your internet connection and retry.');
+    }
   });
 
   socket.on('server_error', (data) => {
-    showToast(`Backend error: ${data.message || 'unknown error'}`, 4000);
-    if (state.running) showCamError();
+    showToast(`AI processing error: ${data.message || 'unknown error'}`, 4000);
   });
 
   // Live frame + gesture data from Python
