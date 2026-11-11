@@ -523,24 +523,38 @@ html, body {
    clipping/overlap a three-column-always layout would have on
    narrow screens. Class hooks for camera size are unaffected, since
    grid-template-columns has no effect once display is no longer grid.
-   Order is overridden so the Camera Feed still appears first. */
+   Order is overridden so the Camera Feed still appears first.
+
+   IMPORTANT: .top-row / .camera-card / .history-card are flex:1 with
+   min-height:0 for the desktop grid. Left like that inside a scrolling
+   panel they SHRINK to the screen height (hiding the Translated Text
+   row, clipping Top Predictions and History) instead of letting the
+   page scroll — so here they take their natural height (flex:none).
+   Per-breakpoint sizing lives in the TRANSLATOR PAGE — RESPONSIVE
+   LAYOUT block at the end of this file. */
 @media (max-width: 1099px) {
   .page-panel.active.main {
     padding: 12px 14px 0;
+    overflow-x: hidden;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
   }
   .top-row {
     display: flex;
     flex-direction: column;
+    flex: 0 0 auto;
     overflow: visible;
   }
   .col-left, .col-right, .col-analytics {
+    flex: 0 0 auto;
+    min-width: 0;
     overflow: visible;
   }
+  .camera-card, .history-card { flex: 0 0 auto; }
   .col-left      { order: 1; }
   .col-analytics { order: 2; }
   .col-right     { order: 3; }
-  .camera-feed { min-height: 280px; }
 }
 
 .col-analytics {
@@ -4413,146 +4427,248 @@ body[data-theme="dark"] { background: var(--app-bg); color: var(--text); }
 
 
 /* ══════════════════════════════════════════════════════════════
-   TRANSLATOR PAGE — MOBILE / TABLET RESPONSIVENESS
-   Tightens the stacked (<=1099px) layout so it needs less vertical
-   scrolling and nothing feels cramped or overlapping. Pure layout/
-   sizing tweaks — no markup, JS, or functionality changes; every
-   #id and class hook referenced by app.js is untouched.
+   TRANSLATOR PAGE — RESPONSIVE LAYOUT
+   Pure CSS: no markup, JS, IDs or class hooks changed (app.js,
+   Socket.IO and the camera pipeline are untouched). Desktop
+   (≥1100px) is not affected by anything below.
+
+   The structural fix for the old "squashed" stack (flex:none instead
+   of flex:1 once stacked) is in the ≤1099px block near .top-row;
+   this block only sizes things per breakpoint.
+
+   Tiers
+     ≤1099px            shared mobile/tablet shell (hamburger nav)
+     ≤480px             phone
+     ≤359px             very small phone
+     ≥600px  portrait   camera on top, Analytics | History beneath
+     ≥560px  landscape  camera left, Analytics over History right
    ══════════════════════════════════════════════════════════════ */
 
-/* ── Tablet (≤1099px): already stacked via the block above. The
-   camera is the primary feature, so it gets a real aspect-ratio box
-   (scales with card width, never stretches) instead of a small fixed
-   min-height; everything else is compacted to make room for it. ── */
+/* ── Shared (≤1099px): shell, camera, cards, controls ─────────── */
 @media (max-width: 1099px) {
-  .camera-feed {
-    min-height: 0;
-    aspect-ratio: 3 / 2;
-    height: auto;
-  }
-  .analytics-hero { min-height: 0; padding: 16px; }
-  .analytics-full { min-height: 0; padding: 14px; }
-  .analytics-mini-card { min-height: 0; }
 
-  /* No card should scroll internally on its own — the page scrolls
-     as one unit instead. */
+  /* dvh follows the *visible* viewport as mobile browser bars
+     show/hide; 100vh stays as the fallback for older engines.
+     Side insets keep content clear of notches in landscape. */
+  .layout {
+    height: 100vh;
+    height: 100dvh;
+    box-sizing: border-box;
+    padding-left:  env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  /* Top bar + nav dropdown: touch-sized, never taller than screen */
+  .topbar {
+    position: relative;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    height: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .hamburger-btn { width: 44px; height: 44px; }
+  .topbar-nav {
+    max-height: calc(100vh - var(--topbar-h) - env(safe-area-inset-top, 0px));
+    max-height: calc(100dvh - var(--topbar-h) - env(safe-area-inset-top, 0px));
+    overflow-y: auto;
+  }
+  .topbar-link { min-height: 44px; font-size: 14px; }
+
+  /* Page scroller */
+  .page-panel.active.main { --page-pad: 14px; padding: 12px var(--page-pad) 0; gap: 12px; }
+  .top-row, .col-left, .col-analytics, .col-right { gap: 12px; }
+  /* No card scrolls internally — the page scrolls as one unit
+     (unscoped on purpose: other pages already relied on this) */
   .card-body { overflow: visible; }
-}
+  .page-panel.active.main .card-header { padding: 11px 14px; }
+  .page-panel.active.main .card-body   { padding: 12px 14px; }
 
-/* ── Tablet / large phone (≤768px) ──
-   Camera stays the largest thing on the page: full card width, fixed
-   aspect-ratio (so it never stretches), sized generously. Analytics +
-   History are compact but every row is fully visible — nothing here
-   scrolls on its own; the whole page scrolls as one unit instead. ── */
-@media (max-width: 768px) {
-  .page-panel.active.main { padding: 10px 12px 0; gap: 10px; }
-  .top-row { gap: 10px; }
-  .col-left, .col-right, .col-analytics { gap: 10px; }
-
-  .card-header { padding: 10px 14px; }
-  .card-body   { padding: 12px 14px; overflow: visible; }
-
-  /* ── Camera: the hero element — generous aspect ratio, tight chrome ── */
-  .camera-body { padding: 6px !important; }
+  /* Camera — the server streams 640×480 (src/config.py), so the box
+     is 4:3 and the frame is shown whole (contain): never stretched,
+     never cropped. Desktop keeps its own fill/cover behaviour. */
+  .camera-body { padding: 8px !important; }
   .camera-feed {
-    aspect-ratio: 5 / 4;   /* taller box = more of hand + face visible */
+    width: 100%;
     height: auto;
     min-height: 0;
+    aspect-ratio: 4 / 3;
+    margin-inline: auto;
   }
+  .camera-feed #camera-img { object-fit: contain; }
 
-  .camera-card-header {
-    grid-template-columns: 1fr auto;
-    row-gap: 2px;
+  /* Translated Text (nested sentence builder) */
+  .sentence-card-nested { margin-top: 4px; padding: 8px 0 10px; }
+  .sentence-display {
+    font-size: clamp(14px, 3.6vw, 18px);
     padding: 8px 12px;
+    min-height: 44px;
   }
-  .camera-card-header #session-time {
-    grid-column: 1 / -1;
-    justify-self: start;
-    font-size: 10px;
-  }
+  .btn-clear-sentence { min-height: 32px; padding: 5px 12px; }
 
-  .sentence-card-nested { margin-top: 4px; padding: 6px 0 8px; }
-  .sentence-display { font-size: 14px; padding: 8px 10px; min-height: 36px; }
-
-  /* ── Gesture Analytics: compact side-by-side instead of two
-     stacked full-width blocks; sized so every row (hero, confidence,
-     all 3 top predictions) is visible with no internal scroll ── */
-  .analytics-body { padding: 12px 14px !important; }
-  .analytics-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
-  .analytics-hero, .analytics-full { grid-column: auto; padding: 12px 14px; min-height: 74px; }
-  .analytics-hero .mini-card-val { font-size: 24px; }
-  .analytics-full .mini-card-val { font-size: 20px; }
+  /* Gesture Analytics: two readable cards side by side, then the
+     Top Predictions rows — every row fully visible, nothing clipped */
+  .analytics-body { padding: 14px !important; }
+  .analytics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .analytics-hero, .analytics-full { grid-column: auto; min-height: 0; padding: 12px 14px; }
+  .analytics-hero .mini-card-val { font-size: clamp(28px, 8vw, 36px); }
+  .analytics-full .mini-card-val { font-size: clamp(22px, 6.5vw, 30px); }
+  /* Icon sits vertically centred on the right so it can never run
+     into the label above it, however narrow the card gets */
   .analytics-hero .mini-card-icon,
-  .analytics-full .mini-card-icon { width: 26px; height: 26px; top: 10px; right: 10px; }
-  .mini-card-sub { display: none; }
-
-  .profile-section-label { font-size: 10.5px; margin: 2px 0 6px; }
+  .analytics-full .mini-card-icon { width: 28px; height: 28px; top: 50%; right: 12px; transform: translateY(-50%); }
+  .mini-card-label { line-height: 1.3; }
+  .mini-card-sub { font-size: 11px; }
   .pred-list { gap: 6px; }
-  .pred-row { padding: 5px 6px; gap: 6px; }
+  .pred-row { grid-template-columns: 20px 26px minmax(0, 1fr) 40px; padding: 6px 8px; }
 
-  /* ── Recent History: comfortably tall enough to breathe, no
-     internal scrollbar — content sits naturally in the card ── */
-  .history-body-wrap { padding: 12px !important; min-height: 150px; }
-  .history-empty { padding: 20px 10px; gap: 8px; }
-  .history-empty-icon { width: 48px; height: 48px; }
+  /* Recent History */
+  .history-body-wrap { padding: 12px !important; min-height: 140px; }
+  .history-item { padding: 10px 12px; }
+  .history-text {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow-wrap: anywhere;
+  }
+  .view-all-btn { min-height: 36px; padding: 6px 12px !important; }
 
-  /* ── Bottom action bar: pinned to the bottom of the viewport so
-     it's always reachable while the page scrolls behind it ── */
-  .controls-bar {
-    flex-wrap: wrap;
-    padding: 8px 10px;
+  /* Start Feed / Stop / Speak — pinned to the bottom of the screen,
+     full-bleed and opaque so scrolled content never shows through
+     (the theme rules make .controls-bar transparent). */
+  .page-panel.active.main .controls-bar {
     position: sticky;
     bottom: 0;
     z-index: 20;
-    box-shadow: 0 -4px 12px rgba(17,24,39,0.06);
+    flex-shrink: 0;
+    margin: 0 calc(-1 * var(--page-pad));
+    padding: 8px var(--page-pad) calc(8px + env(safe-area-inset-bottom, 0px));
+    background: var(--app-bg);
+    box-shadow: 0 -6px 14px -10px rgba(17, 24, 39, 0.35);
   }
-  .controls-group {
-    width: 100%;
-    gap: 8px;
-  }
+  .controls-group { width: 100%; gap: 8px; }
   .controls-group .btn {
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 44px;
     justify-content: center;
-    padding: 10px 8px;
+    padding: 0 8px;
+    font-size: clamp(12px, 3.4vw, 14px);
+  }
+
+  /* Toast: wrap instead of running off a narrow screen, and sit
+     above the pinned controls */
+  .toast {
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    white-space: normal;
+    text-align: center;
+    padding: 8px 14px;
+    font-size: 12.5px;
   }
 }
 
-/* ── Phone (≤560px) ── */
-@media (max-width: 560px) {
-  .page-panel.active.main { padding: 8px 10px 0; }
+/* Card padding other pages have always had at ≤768px (kept as-is) */
+@media (max-width: 768px) {
+  .card-header { padding: 10px 14px; }
+  .card-body   { padding: 12px 14px; }
+}
 
-  .card { border-radius: var(--radius); }
+/* ── Phone (≤480px) ───────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .page-panel.active.main { --page-pad: 10px; padding-top: 10px; gap: 10px; }
+  .top-row, .col-left, .col-analytics, .col-right { gap: 10px; }
+  .page-panel.active.main .card-header { padding: 10px 12px; }
+  .camera-body { padding: 6px !important; }
 
-  /* Camera keeps its own aspect-ratio box from the 768px tier above —
-     don't shrink it further here, it's the primary feature. */
-  .cam-icon-wrap { width: 44px; height: 44px; }
+  /* Header: title + fps on one row, session timer beneath, so
+     nothing is squeezed into three tight columns */
+  .camera-card-header { grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; }
+  .camera-card-header #session-time { grid-column: 1 / -1; justify-self: start; font-size: 10.5px; }
+
+  /* Camera status text (placeholder / loading / error) scaled to fit */
+  .cam-placeholder { padding: 0 14px; gap: 6px; }
+  .cam-icon-wrap { width: 44px; height: 44px; margin-bottom: 0; }
   .cam-text { font-size: 13px; }
   .cam-hint { font-size: 11px; }
 
-  .analytics-grid { grid-template-columns: 1fr 1fr; }
-  .analytics-hero, .analytics-full { min-height: 66px; }
-  .analytics-hero .mini-card-val { font-size: 21px; }
-  .analytics-full .mini-card-val { font-size: 17px; }
-  .analytics-hero .mini-card-icon,
-  .analytics-full .mini-card-icon { display: none; }
-
-  .pred-row {
-    grid-template-columns: 16px 22px 1fr 32px;
-    gap: 6px;
-    padding: 5px 6px;
-  }
-  .pred-letter { font-size: 13px; }
-  .pred-pct { font-size: 11px; }
-
-  .history-body-wrap { min-height: 130px; }
-
-  .sentence-display { font-size: 13.5px; }
   .sentence-display-label { display: none; }
 
-  .controls-group .btn {
-    font-size: 12.5px;
-    padding: 10px 6px;
-    gap: 5px;
+  .history-body-wrap { min-height: 130px; }
+}
+
+/* ── Very small phone (≤359px): stack the analytics cards ─────── */
+@media (max-width: 359px) {
+  .analytics-grid { grid-template-columns: minmax(0, 1fr); }
+  .controls-group .btn { gap: 4px; padding: 0 4px; }
+}
+
+/* ── Portrait tablet / large phone (≥600px): camera on top,
+      Analytics and History share the row beneath ─────────────── */
+@media (min-width: 600px) and (max-width: 1099px) and (orientation: portrait) {
+  .page-panel.active.main { --page-pad: 18px; }
+  /* (.page-panel.active.main prefix beats the JS-applied
+      .top-row.camera-* column rules) */
+  .page-panel.active.main .top-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas: "cam cam" "ana his";
+    gap: 14px;
   }
-  .controls-group .btn svg { flex-shrink: 0; }
+  .col-left      { grid-area: cam; }
+  .col-analytics { grid-area: ana; }
+  .col-right     { grid-area: his; }
+  /* equal-height cards in the shared row */
+  .col-analytics .analytics-card,
+  .col-right .history-card { flex: 1 0 auto; }
+  .camera-body { padding: 10px !important; }
+  .history-body-wrap { min-height: 200px; }
+}
+
+/* ── Landscape tablet / phone (≥560px): camera left, Analytics
+      over History on the right ──────────────────────────────── */
+@media (min-width: 560px) and (max-width: 1099px) and (orientation: landscape) {
+  .page-panel.active.main { --page-pad: 14px; }
+  .page-panel.active.main .top-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+    grid-template-areas: "cam ana" "cam his";
+    grid-template-rows: auto 1fr;
+    align-items: start;
+    gap: 12px;
+  }
+  .col-left      { grid-area: cam; }
+  .col-analytics { grid-area: ana; }
+  .col-right     { grid-area: his; }
+  /* On short screens keep the whole camera frame visible (still 4:3) */
+  .camera-feed {
+    width: min(100%, max(300px, calc((100vh - 220px) * 4 / 3)));
+    width: min(100%, max(300px, calc((100dvh - 220px) * 4 / 3)));
+  }
+}
+
+/* Split layouts whose Analytics column is too narrow for two cards
+   side by side (each would drop under ~150px): stack them instead */
+@media (min-width: 600px) and (max-width: 725px) and (orientation: portrait),
+       (min-width: 560px) and (max-width: 899px) and (orientation: landscape) {
+  .analytics-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Short landscape screens (phones turned sideways, ≤480px tall): the
+   chrome is compacted so the whole camera frame fits above the pinned
+   action bar — top bar, camera padding and bar are all slimmer, and
+   the (still 4:3) camera is sized to the height that is left. */
+@media (max-width: 1099px) and (max-height: 480px) and (orientation: landscape) {
+  :root { --topbar-h: 48px; }
+  .hamburger-btn { width: 40px; height: 40px; }
+  .page-panel.active.main { padding-top: 8px; }
+  .camera-card-header { padding: 6px 14px; }
+  .camera-body { padding: 6px !important; }
+  .camera-feed {
+    width: min(100%, max(240px, calc((100vh - 160px) * 4 / 3)));
+    width: min(100%, max(240px, calc((100dvh - 160px) * 4 / 3)));
+  }
+  .page-panel.active.main .controls-bar { padding-top: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)); }
+  .controls-group .btn { min-height: 40px; }
 }
