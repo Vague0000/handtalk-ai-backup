@@ -1296,7 +1296,7 @@ async function startCamera() {
     browserCameraCanvas.height = 480;
 
     // --- PASTE YOUR SNIPPET HERE ---
-    // Create an overlay canvas for drawing landmarks
+            // Create an overlay canvas for drawing landmarks
     window.landmarkCanvas = document.createElement('canvas');
     window.landmarkCanvas.style.position = 'absolute';
     window.landmarkCanvas.style.top = '0';
@@ -1304,7 +1304,7 @@ async function startCamera() {
     window.landmarkCanvas.style.width = '100%';
     window.landmarkCanvas.style.height = '100%';
     window.landmarkCanvas.style.pointerEvents = 'none';
-    // -------------------------------
+    window.landmarkCanvas.style.transform = 'scaleX(-1)'; // IBINALIK NATIN ITO
 
     state.running = true;
     startSessionTimer();
@@ -1708,7 +1708,7 @@ function connectSocket() {
     if (browserCameraVideo && !browserCameraVideo.parentNode) {
       browserCameraVideo.style.width = '100%';
       browserCameraVideo.style.height = '100%';
-      browserCameraVideo.style.objectFit = 'fill';
+      browserCameraVideo.style.objectFit = 'cover';
       browserCameraVideo.style.transform = 'scaleX(-1)'; 
       el('camera-feed').appendChild(browserCameraVideo);
       
@@ -1717,7 +1717,7 @@ function connectSocket() {
         el('camera-feed').appendChild(window.landmarkCanvas);
       }
     }
-
+    
     // Ensure canvas dimensions match the container perfectly on every frame
     if (window.landmarkCanvas) {
         window.landmarkCanvas.width = el('camera-feed').clientWidth;
