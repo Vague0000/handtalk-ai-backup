@@ -1,3 +1,5 @@
+import os
+
 # ─── Feature Flags ────────────────────────────────────────────────────────────
 #
 # ENABLE_LOGIN controls whether the authentication system is active.
@@ -10,7 +12,12 @@
 #   True   →  Normal operation. Users must register and log in. All session
 #             checks, protected routes, and auth UI elements are active.
 #
-ENABLE_LOGIN = False
+# Set ENABLE_LOGIN=true in the deployment environment only after configuring
+# a reachable MySQL database through DB_HOST, DB_PORT, DB_USER, DB_PASSWORD,
+# and DB_NAME. The false default preserves the current guest-mode behavior.
+ENABLE_LOGIN = os.environ.get("ENABLE_LOGIN", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 # ─── Page Visibility Flags ─────────────────────────────────────────────────────
 # Set any of these to True to restore the page in the sidebar and navigation.

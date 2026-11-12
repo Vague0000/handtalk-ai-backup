@@ -1325,18 +1325,17 @@ function startBrowserFramePump() {
   stopBrowserFramePump();
   if (!browserCameraVideo || !browserCameraCanvas || !socket?.connected) return;
   const context = browserCameraCanvas.getContext('2d', { alpha: false });
+  
   browserFrameTimer = setInterval(() => {
     if (!state.running || !socket?.connected || browserFrameBusy) return;
     if (browserCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     browserFrameBusy = true;
     try {
-      const width = browserCameraVideo.videoWidth || 640;
-      const height = browserCameraVideo.videoHeight || 480;
-      const scale = Math.min(1, 640 / width, 480 / height);
-      browserCameraCanvas.width = Math.max(1, Math.round(width * scale));
-      browserCameraCanvas.height = Math.max(1, Math.round(height * scale));
+      browserCameraCanvas.width = 320; // Lower resolution for server speed
+      browserCameraCanvas.height = 240;
       context.drawImage(browserCameraVideo, 0, 0, browserCameraCanvas.width, browserCameraCanvas.height);
-      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.65).split(',')[1];
+      
+      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.5).split(',')[1]; // Lower quality
       socket.emit('process_frame', { image: jpeg }, () => {
         browserFrameBusy = false;
       });
@@ -1344,7 +1343,7 @@ function startBrowserFramePump() {
       browserFrameBusy = false;
       console.error('[camera] Frame capture failed:', error);
     }
-  }, 120); // About 8 frames/second; keeps Render CPU and bandwidth reasonable.
+  }, 120); 
 }
 
 function stopBrowserFramePump() {
@@ -1362,6 +1361,9 @@ function stopBrowserCamera() {
   if (browserCameraVideo) {
     browserCameraVideo.pause();
     browserCameraVideo.srcObject = null;
+    if (browserCameraVideo.parentNode) {
+      browserCameraVideo.parentNode.removeChild(browserCameraVideo);
+    }
   }
   browserCameraVideo = null;
   browserCameraCanvas = null;
@@ -1673,40 +1675,59 @@ function connectSocket() {
     showToast(`AI processing error: ${data.message || 'unknown error'}`, 4000);
   });
 
-  // Live frame + gesture data from Python
+    // ── LIVE FRAME DATA ──
   socket.on('frame', (data) => {
-    // Defense-in-depth: ignore any frame that arrives after the session
-    // has been stopped (e.g. one already in flight when Stop was clicked).
     if (!state.running) return;
 
-    // Camera feed
-    if (data.image) {
-      if (!el('camera-feed').classList.contains('active')) hideCamLoading();
+    // 1. Show local video instead of waiting for base64 image from server
+    if (!el('camera-feed').classList.contains('active')) {
+      hideCamLoading();
       el('camera-feed').classList.add('active');
-      el('camera-img').src = 'data:image/jpeg;base64,' + data.image;
+    }
+    
+    // Hide the old <img> element completely
+    const camImg = el('camera-img');
+    if (camImg) camImg.style.display = 'none';
+
+    // Attach the local video element to the DOM if not already there
+    if (browserCameraVideo && !browserCameraVideo.parentNode) {
+      // Add styles so it fits perfectly in the camera box
+      browserCameraVideo.style.width = '100%';
+      browserCameraVideo.style.height = '100%';
+      browserCameraVideo.style.objectFit = 'cover';
+      browserCameraVideo.style.transform = 'scaleX(-1)'; // Mirror effect
+      el('camera-feed').appendChild(browserCameraVideo);
     }
 
-    // FPS
+    // 2. FPS
     const fpsBadge = el('fps-badge-inline');
     if (fpsBadge) fpsBadge.textContent = (data.fps || 0).toFixed(0) + ' fps';
 
-    // Gesture
-    updateGesture(
-      data.gesture,
-      data.confidence,
-      data.top_k,
-      data.mode
-    );
+    // 3. Gesture
+    updateGesture(data.gesture, data.confidence, data.top_k, data.mode);
 
-    // Sentence builder (built server-side, mirrors main.py's WordBuilder)
+    // 4. Sentence builder
     updateSentence(data.sentence, data.speak_progress);
   });
 
-  // Sentence was spoken by Python (manual Speak button OR SPEAK-gesture hold)
+  // ── SPOKEN EVENT ──
   socket.on('spoken', (data) => {
     addToHistory(data.text);
     showToast(`Spoke: "${data.text}"`);
     flashSpeaking();
+
+    // NEW: Browser Text-to-Speech instead of Python pyttsx3
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(data.text);
+      if (currentSettings) {
+        utter.rate = parseFloat(currentSettings.speech_speed) || 1.0;
+        utter.volume = (parseInt(currentSettings.speech_volume, 10) ?? 100) / 100;
+        const voice = findMatchingBrowserVoice(currentSettings.speech_voice);
+        if (voice) utter.voice = voice;
+      }
+      window.speechSynthesis.speak(utter);
+    }
   });
 }
 
