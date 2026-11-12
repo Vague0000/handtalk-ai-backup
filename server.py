@@ -319,7 +319,14 @@ class GestureStreamer:
                 self._fps_count = 0
                 self._fps_started = now
 
-            # REMOVED: cv2.imencode and sending image back. This saves massive CPU.
+                        # --- ADD THIS BLOCK RIGHT BEFORE socketio.emit ---
+            landmarks_data = []
+            if results and results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    for lm in hand_landmarks.landmark:
+                        landmarks_data.append({'x': lm.x, 'y': lm.y})
+            # ------------------------------------------------
+
             socketio.emit("frame", {
                 "fps": self._fps_value,
                 "gesture": gesture,
@@ -328,6 +335,7 @@ class GestureStreamer:
                 "mode": "HYBRID" if self.motion_ok else "STATIC",
                 "sentence": self.builder.sentence,
                 "speak_progress": speak_progress,
+                "landmarks": landmarks_data, # <-- ADD THIS
             })
 
     def _enhance(self, frame):

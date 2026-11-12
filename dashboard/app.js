@@ -1291,9 +1291,20 @@ async function startCamera() {
     browserCameraVideo.srcObject = browserCameraStream;
     await browserCameraVideo.play();
 
-    browserCameraCanvas = document.createElement('canvas');
-    browserCameraCanvas.width = 640;
+        browserCameraCanvas = document.createElement('canvas');
+    browserCameraCanvas.width = 640; 
     browserCameraCanvas.height = 480;
+
+    // --- PASTE YOUR SNIPPET HERE ---
+    // Create an overlay canvas for drawing landmarks
+    window.landmarkCanvas = document.createElement('canvas');
+    window.landmarkCanvas.style.position = 'absolute';
+    window.landmarkCanvas.style.top = '0';
+    window.landmarkCanvas.style.left = '0';
+    window.landmarkCanvas.style.width = '100%';
+    window.landmarkCanvas.style.height = '100%';
+    window.landmarkCanvas.style.pointerEvents = 'none';
+    // -------------------------------
 
     state.running = true;
     startSessionTimer();
@@ -1331,11 +1342,13 @@ function startBrowserFramePump() {
     if (browserCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     browserFrameBusy = true;
     try {
-      browserCameraCanvas.width = 320; // Lower resolution for server speed
-      browserCameraCanvas.height = 240;
+            // Change these lines:
+      browserCameraCanvas.width = 640; 
+      browserCameraCanvas.height = 480;
       context.drawImage(browserCameraVideo, 0, 0, browserCameraCanvas.width, browserCameraCanvas.height);
       
-      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.5).split(',')[1]; // Lower quality
+      // Increase quality from 0.5 to 0.7
+      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.7).split(',')[1]; 
       socket.emit('process_frame', { image: jpeg }, () => {
         browserFrameBusy = false;
       });
@@ -1367,6 +1380,13 @@ function stopBrowserCamera() {
   }
   browserCameraVideo = null;
   browserCameraCanvas = null;
+
+  // --- PASTE IT RIGHT HERE ---
+  if (window.landmarkCanvas && window.landmarkCanvas.parentNode) {
+    window.landmarkCanvas.parentNode.removeChild(window.landmarkCanvas);
+    window.landmarkCanvas = null;
+  }
+  // ---------------------------
 }
 
 // Release the visitor's webcam if they navigate away or close the tab.
@@ -1676,37 +1696,77 @@ function connectSocket() {
   });
 
     // ── LIVE FRAME DATA ──
-  socket.on('frame', (data) => {
+    socket.on('frame', (data) => {
     if (!state.running) return;
 
-    // 1. Show local video instead of waiting for base64 image from server
     if (!el('camera-feed').classList.contains('active')) {
       hideCamLoading();
       el('camera-feed').classList.add('active');
+      el('camera-img').style.display = 'none';
     }
     
-    // Hide the old <img> element completely
-    const camImg = el('camera-img');
-    if (camImg) camImg.style.display = 'none';
-
-    // Attach the local video element to the DOM if not already there
     if (browserCameraVideo && !browserCameraVideo.parentNode) {
-      // Add styles so it fits perfectly in the camera box
       browserCameraVideo.style.width = '100%';
       browserCameraVideo.style.height = '100%';
-      browserCameraVideo.style.objectFit = 'cover';
-      browserCameraVideo.style.transform = 'scaleX(-1)'; // Mirror effect
+      browserCameraVideo.style.objectFit = 'fill';
+      browserCameraVideo.style.transform = 'scaleX(-1)'; 
       el('camera-feed').appendChild(browserCameraVideo);
+      
+            // Append the drawing canvas on top of the video
+      if (window.landmarkCanvas) {
+        el('camera-feed').appendChild(window.landmarkCanvas);
+      }
     }
 
-    // 2. FPS
+    // Ensure canvas dimensions match the container perfectly on every frame
+    if (window.landmarkCanvas) {
+        window.landmarkCanvas.width = el('camera-feed').clientWidth;
+        window.landmarkCanvas.height = el('camera-feed').clientHeight;
+    }
+
+    // --- DRAW THE LANDMARKS ---
+    if (window.landmarkCanvas && data.landmarks && data.landmarks.length > 0) {
+      const ctx = window.landmarkCanvas.getContext('2d');
+      const w = window.landmarkCanvas.width;
+      const h = window.landmarkCanvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      // Standard MediaPipe Hand Connections (lines between joints)
+      const connections = [
+        [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+        [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]
+      ];
+
+      // Draw lines
+      ctx.strokeStyle = '#d3d3d3';
+      ctx.lineWidth = 3;
+      connections.forEach(([i, j]) => {
+        if (data.landmarks[i] && data.landmarks[j]) {
+          ctx.beginPath();
+          ctx.moveTo(data.landmarks[i].x * w, data.landmarks[i].y * h);
+          ctx.lineTo(data.landmarks[j].x * w, data.landmarks[j].y * h);
+          ctx.stroke();
+        }
+      });
+
+      // Draw dots
+      ctx.fillStyle = '#ffffff';
+      data.landmarks.forEach(pt => {
+        ctx.beginPath();
+        ctx.arc(pt.x * w, pt.y * h, 4, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+    } else if (window.landmarkCanvas) {
+      // Clear canvas if no hand detected
+      window.landmarkCanvas.getContext('2d').clearRect(0, 0, window.landmarkCanvas.width, window.landmarkCanvas.height);
+    }
+    // --------------------------
+
+    // FPS, Gesture, Sentence (keep the rest exactly the same)
     const fpsBadge = el('fps-badge-inline');
     if (fpsBadge) fpsBadge.textContent = (data.fps || 0).toFixed(0) + ' fps';
 
-    // 3. Gesture
     updateGesture(data.gesture, data.confidence, data.top_k, data.mode);
-
-    // 4. Sentence builder
     updateSentence(data.sentence, data.speak_progress);
   });
 
