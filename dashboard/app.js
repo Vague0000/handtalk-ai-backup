@@ -1272,13 +1272,12 @@ function retryCamera() {
 async function startCamera() {
   if (state.running) return;
   if (!navigator.mediaDevices?.getUserMedia) {
-    showCameraError('This browser cannot access the camera. Use a current browser over HTTPS.');
+    showCameraError('This browser cannot access the camera. Use HTTPS.');
     return;
   }
 
   showCamLoading();
   try {
-    // The webcam is opened on the visitor's device, not on the Render server.
     browserCameraStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
@@ -1291,12 +1290,10 @@ async function startCamera() {
     browserCameraVideo.srcObject = browserCameraStream;
     await browserCameraVideo.play();
 
-        browserCameraCanvas = document.createElement('canvas');
-    browserCameraCanvas.width = 640; 
-    browserCameraCanvas.height = 480;
+    browserCameraCanvas = document.createElement('canvas');
+    browserCameraCanvas.width = 480; 
+    browserCameraCanvas.height = 360;
 
-    // --- PASTE YOUR SNIPPET HERE ---
-            // Create an overlay canvas for drawing landmarks
     window.landmarkCanvas = document.createElement('canvas');
     window.landmarkCanvas.style.position = 'absolute';
     window.landmarkCanvas.style.top = '0';
@@ -1304,7 +1301,7 @@ async function startCamera() {
     window.landmarkCanvas.style.width = '100%';
     window.landmarkCanvas.style.height = '100%';
     window.landmarkCanvas.style.pointerEvents = 'none';
-    window.landmarkCanvas.style.transform = 'scaleX(-1)'; // IBINALIK NATIN ITO
+    window.landmarkCanvas.style.transform = 'scaleX(-1)';
 
     state.running = true;
     startSessionTimer();
@@ -1312,17 +1309,7 @@ async function startCamera() {
     connectSocket();
   } catch (error) {
     stopBrowserCamera();
-    let message = 'Unable to start the camera. Please check your camera and browser permissions.';
-    if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
-      message = 'Camera permission was denied. Allow camera access in your browser settings, then retry.';
-    } else if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
-      message = 'No camera was detected. Connect a webcam and try again.';
-    } else if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
-      message = 'The camera is already being used by another application. Close it and retry.';
-    } else if (error?.name === 'OverconstrainedError') {
-      message = 'The camera does not support the requested video settings. Try another camera.';
-    }
-    showCameraError(message);
+    showCameraError('Unable to start the camera.');
   }
 }
 
@@ -1342,13 +1329,8 @@ function startBrowserFramePump() {
     if (browserCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     browserFrameBusy = true;
     try {
-            // Change these lines:
-      browserCameraCanvas.width = 640; 
-      browserCameraCanvas.height = 480;
       context.drawImage(browserCameraVideo, 0, 0, browserCameraCanvas.width, browserCameraCanvas.height);
-      
-      // Increase quality from 0.5 to 0.7
-      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.7).split(',')[1]; 
+      const jpeg = browserCameraCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
       socket.emit('process_frame', { image: jpeg }, () => {
         browserFrameBusy = false;
       });
@@ -1356,7 +1338,7 @@ function startBrowserFramePump() {
       browserFrameBusy = false;
       console.error('[camera] Frame capture failed:', error);
     }
-  }, 120); 
+  }, 150); 
 }
 
 function stopBrowserFramePump() {
@@ -1374,19 +1356,15 @@ function stopBrowserCamera() {
   if (browserCameraVideo) {
     browserCameraVideo.pause();
     browserCameraVideo.srcObject = null;
-    if (browserCameraVideo.parentNode) {
-      browserCameraVideo.parentNode.removeChild(browserCameraVideo);
-    }
+    if (browserCameraVideo.parentNode) browserCameraVideo.parentNode.removeChild(browserCameraVideo);
   }
   browserCameraVideo = null;
   browserCameraCanvas = null;
-
-  // --- PASTE IT RIGHT HERE ---
+  
   if (window.landmarkCanvas && window.landmarkCanvas.parentNode) {
     window.landmarkCanvas.parentNode.removeChild(window.landmarkCanvas);
     window.landmarkCanvas = null;
   }
-  // ---------------------------
 }
 
 // Release the visitor's webcam if they navigate away or close the tab.
@@ -1696,7 +1674,7 @@ function connectSocket() {
   });
 
     // ── LIVE FRAME DATA ──
-    socket.on('frame', (data) => {
+      socket.on('frame', (data) => {
     if (!state.running) return;
 
     if (!el('camera-feed').classList.contains('active')) {
@@ -1712,12 +1690,13 @@ function connectSocket() {
       browserCameraVideo.style.transform = 'scaleX(-1)'; 
       el('camera-feed').appendChild(browserCameraVideo);
       
-            // Append the drawing canvas on top of the video
       if (window.landmarkCanvas) {
-        el('camera-feed').appendChild(window.landmarkCanvas);
+          window.landmarkCanvas.width = el('camera-feed').clientWidth;
+          window.landmarkCanvas.height = el('camera-feed').clientHeight;
+          el('camera-feed').appendChild(window.landmarkCanvas);
       }
     }
-    
+
     // Ensure canvas dimensions match the container perfectly on every frame
     if (window.landmarkCanvas) {
         window.landmarkCanvas.width = el('camera-feed').clientWidth;
@@ -1731,14 +1710,12 @@ function connectSocket() {
       const h = window.landmarkCanvas.height;
       ctx.clearRect(0, 0, w, h);
 
-      // Standard MediaPipe Hand Connections (lines between joints)
       const connections = [
         [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
         [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]
       ];
 
-      // Draw lines
-      ctx.strokeStyle = '#d3d3d3';
+      ctx.strokeStyle = '#d3d3d3'; 
       ctx.lineWidth = 3;
       connections.forEach(([i, j]) => {
         if (data.landmarks[i] && data.landmarks[j]) {
@@ -1749,7 +1726,6 @@ function connectSocket() {
         }
       });
 
-      // Draw dots
       ctx.fillStyle = '#ffffff';
       data.landmarks.forEach(pt => {
         ctx.beginPath();
@@ -1757,12 +1733,9 @@ function connectSocket() {
         ctx.fill();
       });
     } else if (window.landmarkCanvas) {
-      // Clear canvas if no hand detected
       window.landmarkCanvas.getContext('2d').clearRect(0, 0, window.landmarkCanvas.width, window.landmarkCanvas.height);
     }
-    // --------------------------
 
-    // FPS, Gesture, Sentence (keep the rest exactly the same)
     const fpsBadge = el('fps-badge-inline');
     if (fpsBadge) fpsBadge.textContent = (data.fps || 0).toFixed(0) + ' fps';
 
@@ -1770,13 +1743,11 @@ function connectSocket() {
     updateSentence(data.sentence, data.speak_progress);
   });
 
-  // ── SPOKEN EVENT ──
-  socket.on('spoken', (data) => {
+    socket.on('spoken', (data) => {
     addToHistory(data.text);
     showToast(`Spoke: "${data.text}"`);
     flashSpeaking();
 
-    // NEW: Browser Text-to-Speech instead of Python pyttsx3
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utter = new SpeechSynthesisUtterance(data.text);
@@ -1789,7 +1760,6 @@ function connectSocket() {
       window.speechSynthesis.speak(utter);
     }
   });
-}
 
 // ─────────────────────────────────────────────────────────────────
 // DICTIONARY PAGE
@@ -2267,4 +2237,5 @@ async function resetSettingsCategory(cat) {
   } catch (err) {
     showToast('Could not reach the server.');
   }
+}
 }
