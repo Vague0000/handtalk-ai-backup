@@ -361,40 +361,18 @@ def get_streamer():
 @socketio.on("connect")
 def on_connect():
     global _connected_clients
-    if not ENABLE_LOGIN:
-        with _clients_lock:
-            _connected_clients += 1
-        try:
-            gs = get_streamer()
-            gs.active_user_id    = None
-            gs.active_session_id = None
-            gs.start()
-        except Exception as e:
-            socketio.emit("server_error", {"message": str(e)})
-        return
-
-    if "user_id" not in session:
-        return False
     with _clients_lock:
         _connected_clients += 1
-    try:
-        gs = get_streamer()
-        gs.active_user_id    = session["user_id"]
-        gs.active_session_id = session.get("session_id")
-        gs.start()
-        touch_last_active(session["user_id"])
-    except Exception as e:
-        socketio.emit("server_error", {"message": str(e)})
-
-
-@socketio.on("disconnect")
-def on_disconnect():
-    global _connected_clients
-    with _clients_lock:
-        _connected_clients = max(0, _connected_clients - 1)
         count = _connected_clients
-    if count == 0 and streamer is not None:
-        streamer.stop()
+    
+    print(f"[server] Client connected ({count} active)")
+    
+    # Only touch the database if they are actually logged in
+    if ENABLE_LOGIN and "user_id" in session:
+        try:
+            touch_last_active(session["user_id"])
+        except Exception as e:
+            print(f"[server] Failed to update last active: {e}")
 
 
 @socketio.on("process_frame")
@@ -402,9 +380,26 @@ def on_process_frame(data):
     try:
         if not isinstance(data, dict):
             raise ValueError("Missing camera frame data.")
-        get_streamer().process_browser_frame(data.get("image", ""))
+        
+        # 1. Get (or create) the streamer. This is where the 15-second model loading happens.
+        gs = get_streamer()
+        
+        # 2. If it's the first frame, we need to start the pipeline and attach the user session.
+        if not gs._running:
+            if ENABLE_LOGIN and "user_id" in session:
+                gs.active_user_id = session["user_id"]
+                gs.active_session_id = session.get("session_id")
+            else:
+                gs.active_user_id = None
+                gs.active_session_id = None
+                
+            gs.start()
+
+        # 3. Now process the frame
+        gs.process_browser_frame(data.get("image", ""))
         return {"ok": True}
     except Exception as e:
+        print(f"[server] Browser frame processing failed: {e}")
         socketio.emit("server_error", {"message": str(e)})
         return {"ok": False, "error": str(e)}
 
